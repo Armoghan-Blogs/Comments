@@ -1,0 +1,363 @@
+# ============================================================
+# 4rm0Byte — Utterances Comments → Discord
+# ============================================================
+#
+# This workflow listens for new comments created by Utterances
+# in the Armoghan-Blogs/Comments repository and sends a
+# beautiful Discord embed to your configured webhook.
+#
+# Repository:
+#   https://github.com/Armoghan-Blogs/Comments
+#
+# Required repository secret:
+#   DISCORD_WEBHOOK_URL
+#
+# ============================================================
+
+name: "💬 Discord Comments Notifications"
+
+on:
+  issue_comment:
+    types:
+      - created
+
+# We don't need repository write access.
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: "💬 Send Comment to Discord"
+    runs-on: ubuntu-latest
+
+    # Utterances uses GitHub Issues.
+    # Ignore comments made on Pull Requests.
+    if: ${{ !github.event.issue.pull_request }}
+
+    steps:
+
+      # ========================================================
+      # 1. GET COMMENT DATA
+      # ========================================================
+
+      - name: "📥 Get Comment Data"
+        id: get_comment_data
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_AUTHOR_NAME: ${{ github.event.comment.user.name }}
+          COMMENT_AUTHOR_AVATAR: ${{ github.event.comment.user.avatar_url }}
+          COMMENT_AUTHOR_URL: ${{ github.event.comment.user.html_url }}
+
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_CREATED_AT: ${{ github.event.comment.created_at }}
+
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_URL: ${{ github.event.repository.html_url }}
+        run: |
+          # Export everything through GITHUB_OUTPUT so later
+          # workflow steps can consume the values safely.
+
+          {
+            echo "comment_body<<EOF"
+            echo "$COMMENT_BODY"
+            echo "EOF"
+
+            echo "comment_author=$COMMENT_AUTHOR"
+            echo "comment_author_name=$COMMENT_AUTHOR_NAME"
+            echo "comment_author_avatar=$COMMENT_AUTHOR_AVATAR"
+            echo "comment_author_url=$COMMENT_AUTHOR_URL"
+
+            echo "comment_url=$COMMENT_URL"
+            echo "comment_created_at=$COMMENT_CREATED_AT"
+
+            echo "issue_title=$ISSUE_TITLE"
+            echo "issue_url=$ISSUE_URL"
+            echo "issue_number=$ISSUE_NUMBER"
+            echo "issue_author=$ISSUE_AUTHOR"
+
+            echo "repository=$REPOSITORY"
+            echo "repository_url=$REPOSITORY_URL"
+          } >> "$GITHUB_OUTPUT"
+
+
+      # ========================================================
+      # 2. FORMAT THE COLLECTED DATA
+      # ========================================================
+
+      - name: "✨ Format The Collected Data"
+        id: format_comment_data
+        env:
+          COMMENT_BODY: ${{ steps.get_comment_data.outputs.comment_body }}
+          COMMENT_AUTHOR: ${{ steps.get_comment_data.outputs.comment_author }}
+          COMMENT_AUTHOR_NAME: ${{ steps.get_comment_data.outputs.comment_author_name }}
+          COMMENT_AUTHOR_AVATAR: ${{ steps.get_comment_data.outputs.comment_author_avatar }}
+          COMMENT_AUTHOR_URL: ${{ steps.get_comment_data.outputs.comment_author_url }}
+
+          COMMENT_URL: ${{ steps.get_comment_data.outputs.comment_url }}
+          COMMENT_CREATED_AT: ${{ steps.get_comment_data.outputs.comment_created_at }}
+
+          ISSUE_TITLE: ${{ steps.get_comment_data.outputs.issue_title }}
+          ISSUE_URL: ${{ steps.get_comment_data.outputs.issue_url }}
+          ISSUE_NUMBER: ${{ steps.get_comment_data.outputs.issue_number }}
+
+          REPOSITORY: ${{ steps.get_comment_data.outputs.repository }}
+          REPOSITORY_URL: ${{ steps.get_comment_data.outputs.repository_url }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from datetime import datetime, timezone
+
+          body = os.environ.get("COMMENT_BODY", "").strip()
+
+          # ----------------------------------------------------
+          # Clean the comment for Discord.
+          # ----------------------------------------------------
+
+          if not body:
+              body = "*No comment text was provided.*"
+
+          # Discord embed descriptions have a 4096-character limit.
+          # Keep some room so the payload remains safe.
+          if len(body) > 3900:
+              body = body[:3897] + "..."
+
+          # ----------------------------------------------------
+          # Convert common GitHub markdown into something that
+          # looks nice inside Discord.
+          # ----------------------------------------------------
+
+          body = body.replace("\r\n", "\n").replace("\r", "\n")
+
+          # Avoid accidentally creating enormous code blocks.
+          body = body.replace("```", "'''")
+
+          # ----------------------------------------------------
+          # Format timestamp.
+          # ----------------------------------------------------
+
+          created_at = os.environ.get("COMMENT_CREATED_AT", "")
+
+          try:
+              dt = datetime.fromisoformat(
+                  created_at.replace("Z", "+00:00")
+              )
+
+              unix_timestamp = int(dt.timestamp())
+
+              discord_timestamp = f"<t:{unix_timestamp}:R>"
+
+          except Exception:
+              discord_timestamp = "just now"
+
+          # ----------------------------------------------------
+          # Create a small readable comment block.
+          # ----------------------------------------------------
+
+          formatted_comment = f"> {body.replace(chr(10), chr(10) + '> ')}"
+
+          # ----------------------------------------------------
+          # Save formatted values.
+          # ----------------------------------------------------
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+
+              output.write(
+                  "formatted_comment<<EOF\n"
+                  + formatted_comment
+                  + "\nEOF\n"
+              )
+
+              output.write(
+                  f"discord_timestamp={discord_timestamp}\n"
+              )
+
+              output.write(
+                  f"comment_length={len(body)}\n"
+              )
+
+              output.write(
+                  f"author_display={os.environ.get('COMMENT_AUTHOR_NAME') or os.environ.get('COMMENT_AUTHOR')}\n"
+              )
+
+
+      # ========================================================
+      # 3. CREATE BEAUTIFUL DISCORD EMBED
+      # ========================================================
+
+      - name: "🎨 Create a Beautiful Discord Embed"
+        id: create_discord_embed
+        env:
+          COMMENT_BODY: ${{ steps.format_comment_data.outputs.formatted_comment }}
+          COMMENT_AUTHOR: ${{ steps.get_comment_data.outputs.comment_author }}
+          COMMENT_AUTHOR_NAME: ${{ steps.format_comment_data.outputs.author_display }}
+          COMMENT_AUTHOR_AVATAR: ${{ steps.get_comment_data.outputs.comment_author_avatar }}
+          COMMENT_AUTHOR_URL: ${{ steps.get_comment_data.outputs.comment_author_url }}
+
+          COMMENT_URL: ${{ steps.get_comment_data.outputs.comment_url }}
+          DISCORD_TIMESTAMP: ${{ steps.format_comment_data.outputs.discord_timestamp }}
+
+          ISSUE_TITLE: ${{ steps.get_comment_data.outputs.issue_title }}
+          ISSUE_URL: ${{ steps.get_comment_data.outputs.issue_url }}
+          ISSUE_NUMBER: ${{ steps.get_comment_data.outputs.issue_number }}
+
+          REPOSITORY: ${{ steps.get_comment_data.outputs.repository }}
+          REPOSITORY_URL: ${{ steps.get_comment_data.outputs.repository_url }}
+
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+
+          # ====================================================
+          # Discord Embed
+          # ====================================================
+
+          embed = {
+              "title": "💬  New Comment",
+              "description": os.environ["COMMENT_BODY"],
+
+              # Discord blurple-ish accent.
+              "color": 0x5865F2,
+
+              "url": os.environ["COMMENT_URL"],
+
+              "author": {
+                  "name": (
+                      f"@{os.environ['COMMENT_AUTHOR']}"
+                      if not os.environ["COMMENT_AUTHOR_NAME"]
+                      else os.environ["COMMENT_AUTHOR_NAME"]
+                  ),
+                  "url": os.environ["COMMENT_AUTHOR_URL"],
+                  "icon_url": os.environ["COMMENT_AUTHOR_AVATAR"]
+              },
+
+              "fields": [
+                  {
+                      "name": "📄  Article",
+                      "value": (
+                          f"[{os.environ['ISSUE_TITLE']}]"
+                          f"({os.environ['ISSUE_URL']})"
+                      ),
+                      "inline": False
+                  },
+                  {
+                      "name": "👤  Commenter",
+                      "value": (
+                          f"[@{os.environ['COMMENT_AUTHOR']}]"
+                          f"({os.environ['COMMENT_AUTHOR_URL']})"
+                      ),
+                      "inline": True
+                  },
+                  {
+                      "name": "💭  Comment",
+                      "value": "See message above",
+                      "inline": True
+                  }
+              ],
+
+              "thumbnail": {
+                  "url": os.environ["COMMENT_AUTHOR_AVATAR"]
+              },
+
+              "footer": {
+                  "text": (
+                      "4rm0Byte  •  Utterances  •  "
+                      f"Issue #{os.environ['ISSUE_NUMBER']}"
+                  )
+              },
+
+              "timestamp": os.environ.get("DISCORD_TIMESTAMP")
+          }
+
+          # Discord doesn't accept <t:...:R> as an ISO timestamp.
+          # Remove it here because the GitHub timestamp is already
+          # represented through the generated field below.
+          embed.pop("timestamp", None)
+
+          # Add relative time as a field.
+          embed["fields"].append({
+              "name": "🕐  Posted",
+              "value": os.environ["DISCORD_TIMESTAMP"],
+              "inline": True
+          })
+
+          payload = {
+              "username": "4rm0Byte Comments",
+
+              "avatar_url": (
+                  "https://raw.githubusercontent.com/"
+                  "Armoghan-Blogs/4rm0Byte/refs/heads/main/static/favicons/"
+                  "favicon.ico"
+              ),
+
+              "embeds": [
+                  embed
+              ],
+
+              "allowed_mentions": {
+                  "parse": []
+              }
+          }
+
+          # ----------------------------------------------------
+          # Save JSON for the next step.
+          # ----------------------------------------------------
+
+          with open("discord_payload.json", "w", encoding="utf-8") as file:
+              json.dump(
+                  payload,
+                  file,
+                  ensure_ascii=False,
+                  separators=(",", ":")
+              )
+
+          print("Discord embed created successfully.")
+          PY
+
+
+      # ========================================================
+      # 4. SEND EMBED TO DISCORD
+      # ========================================================
+
+      - name: "🚀 Send the Embed to Discord"
+        id: send_discord_embed
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "❌ DISCORD_WEBHOOK_URL secret is not configured."
+            exit 1
+          fi
+
+          echo "Sending comment notification to Discord..."
+
+          HTTP_STATUS=$(curl \
+            --silent \
+            --show-error \
+            --output discord_response.txt \
+            --write-out "%{http_code}" \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --data-binary @discord_payload.json \
+            "$DISCORD_WEBHOOK_URL")
+
+          echo "Discord HTTP status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "❌ Discord webhook failed."
+
+            echo "Discord response:"
+            cat discord_response.txt
+
+            exit 1
+          fi
+
+          echo "✅ Discord notification sent successfully."
